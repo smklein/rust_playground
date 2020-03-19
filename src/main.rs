@@ -3,9 +3,9 @@
 use common::SOCKET_PATH;
 use std::fs::remove_file;
 use std::io::Write;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
-use std::os::unix::net::{UnixStream, UnixListener};
 
 mod common;
 
