@@ -1,11 +1,12 @@
-#![allow(unused_variables)]
-
 extern crate failure;
+extern crate nix;
 
 use common::SOCKET_PATH;
 use failure::Error;
+use nix::sys::socket::{getsockopt, sockopt};
 use std::fs::remove_file;
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
@@ -17,7 +18,18 @@ fn handle_client(mut stream: UnixStream) -> Result<(), Error> {
 
     let mut buffer = vec![0; 1024];
     let n = stream.read(buffer.as_mut_slice())?;
-    let m = stream.write(&buffer[..n])?;
+
+    println!(
+        "SERVER: Local: {:#?}, Remote: {:#?}",
+        stream.local_addr()?,
+        stream.peer_addr()?
+    );
+
+    let peer_creds = getsockopt(stream.as_raw_fd(), sockopt::PeerCredentials)?;
+
+    println!("SERVER: Peer credentials: {:#?}", peer_creds);
+
+    stream.write_all(&buffer[..n])?;
     Ok(())
 }
 
@@ -59,13 +71,13 @@ fn client() -> Result<(), Error> {
     let socket = Path::new(SOCKET_PATH);
     let mut stream = UnixStream::connect(&socket)?;
 
-    // Send message
+    // Send request.
     let message = "hello";
     stream.write_all(message.as_bytes())?;
 
     // Read response.
     let mut buffer = vec![0; message.len()];
-    let n = stream.read(buffer.as_mut_slice())?;
+    let _ = stream.read(buffer.as_mut_slice())?;
     let output = std::str::from_utf8(&buffer)?;
     println!("CLIENT: Read [{}]", output);
 

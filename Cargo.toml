@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 failure = "0.1.7"
+nix = "0.17.0"
