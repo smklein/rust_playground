@@ -8,4 +8,5 @@ edition = "2018"
 
 [dependencies]
 failure = "0.1.7"
+libc = "0.2.68"
 nix = "0.17.0"

@@ -1,97 +1,49 @@
-extern crate failure;
-extern crate nix;
-
 use common::SOCKET_PATH;
+use delegator_client::DelegatorClient;
+use delegator_server::DelegatorServer;
+use echo_client::EchoClient;
 use failure::Error;
-use nix::sys::socket::{getsockopt, sockopt};
-use std::fs::remove_file;
-use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::thread;
+use std::path::Path;
 
 mod common;
+mod delegator_client;
+mod delegator_server;
+mod echo_client;
+mod echo_server;
 
-fn handle_client(mut stream: UnixStream) -> Result<(), Error> {
-    println!("SERVER: Handling client");
-
-    let mut buffer = vec![0; 1024];
-    let n = stream.read(buffer.as_mut_slice())?;
-
-    println!(
-        "SERVER: Local: {:#?}, Remote: {:#?}",
-        stream.local_addr()?,
-        stream.peer_addr()?
-    );
-
-    let peer_creds = getsockopt(stream.as_raw_fd(), sockopt::PeerCredentials)?;
-
-    println!("SERVER: Peer credentials: {:#?}", peer_creds);
-
-    stream.write_all(&buffer[..n])?;
-    Ok(())
-}
-
-struct Server {
-    listener: UnixListener,
-}
-
-impl Server {
-    fn new() -> Result<Server, Error> {
-        let socket_path = Path::new(SOCKET_PATH);
-
-        if socket_path.exists() {
-            remove_file(&socket_path)?;
-        }
-
-        let listener = UnixListener::bind(socket_path)?;
-
-        Ok(Server { listener })
-    }
-
-    fn run(&self) -> Result<(), Error> {
-        // Accept connections and process them, spawning a new thread for each one.
-        for stream in self.listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    thread::spawn(|| handle_client(stream));
-                }
-                Err(err) => {
-                    eprintln!("Server refused to handle client: {}", err);
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn client() -> Result<(), Error> {
-    let socket = Path::new(SOCKET_PATH);
-    let mut stream = UnixStream::connect(&socket)?;
-
-    // Send request.
-    let message = "hello";
-    stream.write_all(message.as_bytes())?;
-
-    // Read response.
-    let mut buffer = vec![0; message.len()];
-    let _ = stream.read(buffer.as_mut_slice())?;
-    let output = std::str::from_utf8(&buffer)?;
-    println!("CLIENT: Read [{}]", output);
-
-    Ok(())
-}
+// TODO: Figure out, PEERCREDS also work for remote sockets?
+//
+// Client --> Server
+//      Asks for new connection.
+//      Asks for it to be accessible to CRED (PID/UID/GID).
+//
+// Server
+//      Creates new UnixListener bound to a new domain socket.
+//      Saves the requested CRED, to be checked.
+//
+// Server --> Client
+//      Sure, here's your stuff @ path.
+//
+// Client may connect via path
+//      On connection, peer credentials validated against CRED.
+//      XXX is this possible? Would be server-side gRPC...
+//          (haven't seen any APIs to do this :/ )
 
 fn main() -> Result<(), Error> {
-    let server = Server::new()?;
+    let path = Path::new(SOCKET_PATH);
+
+    let mut server = DelegatorServer::new(path)?;
     thread::spawn(move || server.run());
 
+
     loop {
-        if let Err(err) = client() {
-            eprintln!("CLIENT: Failure: {}", err);
-        }
+        let mut client = DelegatorClient::new(path)?;
+        let echo_socket = client.acquire("echo")?;
+
+        let mut echo_client = EchoClient::new(&echo_socket)?;
+        let message = echo_client.echo("hello")?;
+        println!("CLIENT: Read [{}]", message);
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
 }
