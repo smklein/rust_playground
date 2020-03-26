@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::identity::Identity;
 use failure::Error;
 use nix::sys::socket::{getsockopt, sockopt};

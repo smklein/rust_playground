@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use failure::Error;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

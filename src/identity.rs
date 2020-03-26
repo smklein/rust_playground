@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use libc::{pid_t, uid_t};
 use nix::sys::socket::UnixCredentials;
 use std::fmt;
