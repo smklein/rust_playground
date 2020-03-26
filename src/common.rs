@@ -1,1 +1,1 @@
-pub static SOCKET_PATH: &str = "SOCKET";
+pub static SOCKET_PATH: &str = "DELEGATION-SOCKET";

@@ -1,39 +1,15 @@
-#![allow(dead_code)]
-
 use crate::echo_server::EchoServer;
+use crate::identity::Identity;
 use failure::Error;
-use libc::{pid_t, uid_t};
-use nix::sys::socket::{getsockopt, sockopt, UnixCredentials};
+use nix::sys::socket::{getsockopt, sockopt};
 use std::collections::HashMap;
 use std::fs::remove_file;
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::str;
 use std::thread;
-
-/// All information used to validate a client's identity.
-///
-/// In the current implementation, this is entirely based off of the
-/// PeerCredentials on the incoming unix domain socket, but other
-/// information could be required to instantiate an identity.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
-    pid: pid_t,
-    uid: uid_t,
-}
-
-impl Identity {
-    fn new(creds: &UnixCredentials) -> Identity {
-        // This is an arbitrary example; we're taking PID/UID
-        // to encapsulate the identity, but we could take other
-        // identifiers if we wanted (user-supplied args, GID, etc).
-        Identity {
-            pid: creds.pid(),
-            uid: creds.uid(),
-        }
-    }
-}
 
 /// Encapsulates the collection of services which are provided
 /// for a client with a particular identity.
@@ -42,40 +18,33 @@ impl Identity {
 /// Service, but in a more complex scenario, this could be a
 /// dynamic list of services granted to a client.
 struct ServiceLedger {
-    server: EchoServer,
+    echo_runner: Option<thread::JoinHandle<Result<(), Error>>>,
 }
 
-struct DelegationState {
-    // XXX XXX XXX
-    //
-    // Probably need to wrap in arc/mutex to share with multiple threads.
-    //
-    // INPUT: PID/UID/GID.
-    // Need to:
-    //  1) Create echo server
-    //  2) Pass PID/UID/GID (maybe "identity" structure?)
-    //  3) *Echo server* impl needs to check validation structure on access
-    //      - Could refactor to be generic of echo impl
-    //  4) Accounting??? How do we track created echo servers?
-    //      - "client" (PID/UID/GID) --> EchoServer thread handle?
-    //      - Can also check "identity" against a capacity
-    //  5) Less threads, make async
-    services: HashMap<Identity, ServiceLedger>,
+impl Drop for ServiceLedger {
+    fn drop(&mut self) {
+        let _ = self.echo_runner.take().unwrap().join();
+    }
 }
 
-fn handle_client(mut stream: UnixStream) -> Result<(), Error> {
-    println!("SERVER: Handling client");
-    let mut buffer = vec![0; 1024];
-    let n = stream.read(buffer.as_mut_slice())?;
-    let peer_creds = getsockopt(stream.as_raw_fd(), sockopt::PeerCredentials)?;
-    println!("SERVER: Peer credentials: {:#?}", peer_creds);
+/// Represents the accounting for all active services.
+///
+/// Maps the socket name to the corresponding running server.
+struct ServiceMapping {
+    mapping: HashMap<String, ServiceLedger>,
+}
 
-    stream.write_all(&buffer[..n])?;
-    Ok(())
+impl ServiceMapping {
+    fn new() -> ServiceMapping {
+        ServiceMapping {
+            mapping: HashMap::new(),
+        }
+    }
 }
 
 pub struct DelegatorServer {
     listener: UnixListener,
+    services: ServiceMapping,
 }
 
 impl DelegatorServer {
@@ -85,21 +54,52 @@ impl DelegatorServer {
         }
 
         let listener = UnixListener::bind(path)?;
-        Ok(DelegatorServer { listener })
+        let services = ServiceMapping::new();
+        Ok(DelegatorServer { listener, services })
     }
 
-    pub fn run(&mut self) -> Result<(), Error> {
+    fn handle_client(&mut self, mut stream: UnixStream) -> Result<(), Error> {
+        println!("DELEGATION SERVER: Delegating client request...");
+        let mut buffer = vec![0; 1024];
+        let n = stream.read(buffer.as_mut_slice())?;
+
+        let service_name = str::from_utf8(&buffer[..n])?.trim();
+        let peer_creds = getsockopt(stream.as_raw_fd(), sockopt::PeerCredentials)?;
+        let identity = Identity::new(&peer_creds);
+
+        if service_name != "echo" {
+            bail!("DELEGATION SERVER: Unexpected service");
+        }
+        let socket_name = format!("{}-{}", service_name, identity);
+
+        println!("DELEGATION SERVER: Creating [{}]", socket_name);
+
+        if self.services.mapping.contains_key(&socket_name) {
+            bail!("DELEGATION SERVER: Service already exists");
+        }
+
+        // In this implementation, we always create an echo server.
+        // In a more "realistic" example, different services could be provided,
+        // depending on the client's request.
+        let echo_server = EchoServer::new(Path::new(&socket_name), identity)?;
+
+        println!("DELEGATION SERVER: Created echo server");
+        let service_ledger = ServiceLedger {
+            echo_runner: Some(thread::spawn(move || echo_server.run_one())),
+        };
+        self.services.mapping.insert(socket_name.clone(), service_ledger);
+
+        stream.write_all(socket_name.as_bytes())?;
+        Ok(())
+    }
+
+    /// Accepts and dispatches a single incoming connection.
+    pub fn run_one(&mut self) -> Result<(), Error> {
         // Accept connections and process them, spawning a new thread for each one.
-        for stream in self.listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    thread::spawn(|| handle_client(stream));
-                }
-                Err(err) => {
-                    eprintln!("Server refused to handle client: {}", err);
-                    break;
-                }
-            }
+        let (stream, _) = self.listener.accept()?;
+        let result = self.handle_client(stream);
+        if let Err(err) = &result {
+            bail!("DELEGATION SERVER: Failed to delegate: {}", err);
         }
         Ok(())
     }
